@@ -102,9 +102,18 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         scanLp.topMargin = dp(14);
         root.addView(scanButton, scanLp);
 
-        status = text("Bereit", 13, false, 0xFF64748B);
-        status.setPadding(0, dp(10), 0, dp(10));
-        root.addView(status);
+        LinearLayout diagnosticCard = card(0xFFFFFFFF, 20);
+        diagnosticCard.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams diagnosticLp = matchWrap();
+        diagnosticLp.topMargin = dp(10);
+        diagnosticLp.bottomMargin = dp(12);
+        root.addView(diagnosticCard, diagnosticLp);
+        diagnosticCard.addView(text("Live-Diagnose", 13, true, 0xFF142033));
+        status = text("Bereit – Radar starten, um Funkmodule zu prüfen.", 12, false, 0xFF64748B);
+        status.setTypeface(Typeface.MONOSPACE);
+        status.setLineSpacing(0f, 1.08f);
+        status.setPadding(0, dp(6), 0, 0);
+        diagnosticCard.addView(status);
 
         TextView section = text("Geräte in der Nähe", 20, true, 0xFF142033);
         section.setPadding(0, dp(4), 0, dp(8));
@@ -205,7 +214,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_PERMISSIONS) {
             if (scanner.hasRequiredPermissions()) toggleScan();
-            else Toast.makeText(this, "Für den Nearby-Scan werden Bluetooth- und Standortberechtigungen benötigt.", Toast.LENGTH_LONG).show();
+            else Toast.makeText(this, "Für den Nearby-Scan werden Bluetooth-, Wi-Fi- und Standortberechtigungen benötigt.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -236,7 +245,11 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         });
     }
 
-    @Override public void onStatus(String value) { runOnUiThread(() -> { if (status != null) status.setText(value); }); }
+    @Override public void onStatus(String value) {
+        runOnUiThread(() -> {
+            if (status != null) status.setText(value);
+        });
+    }
 
     private NearbyReading get(String key, String name) {
         NearbyReading d = devices.get(key);
@@ -260,13 +273,12 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
             heroValue.setText(String.valueOf(r.proximity));
             heroValue.setTextColor(scoreColor(r.proximity));
             heroLabel.setText(top.name);
-            heroMeta.setText("Vertrauen " + r.confidence + "/100 · " + top.sourceLabel());
+            heroMeta.setText(visible.size() + " aktuelle Signale · Vertrauen " + r.confidence + "/100 · " + top.sourceLabel());
         } else {
             heroValue.setText("--");
             heroLabel.setText("Nähe 0–100");
-            heroMeta.setText("Noch keine aktuelle Messung");
+            heroMeta.setText(scanner.isRunning() ? "Radar aktiv · noch keine verwertbare Messung" : "Noch keine aktuelle Messung");
         }
-        if (status != null && scanner.isRunning()) status.setText(visible.size() + " aktuelle Signale");
     }
 
     private class DeviceAdapter extends BaseAdapter {
