@@ -24,6 +24,8 @@ import java.util.Map;
 
 public class MainActivity extends Activity implements MultiRadioScanner.Listener {
     private static final int REQ_PERMISSIONS = 100;
+    private static final int REQ_NEARBY_WIFI = 101;
+
     private final Map<String, NearbyReading> devices = new LinkedHashMap<>();
     private final List<NearbyReading> visible = new ArrayList<>();
     private MultiRadioScanner scanner;
@@ -36,9 +38,13 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
     private Button scanButton;
     private boolean detailMode;
     private NearbyReading selected;
+    private boolean nearbyWifiPromptedThisSession;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().setStatusBarColor(0xFFF4F7FB);
+        getWindow().setNavigationBarColor(0xFFF4F7FB);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         scanner = new MultiRadioScanner(this, this);
         showDashboard();
     }
@@ -48,11 +54,22 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         super.onDestroy();
     }
 
+    private void applySafeInsets(LinearLayout root) {
+        root.setPadding(dp(20), dp(32), dp(20), dp(18));
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            v.setPadding(dp(20), Math.max(dp(20), top + dp(10)), dp(20), Math.max(dp(18), bottom + dp(10)));
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
     private void showDashboard() {
         detailMode = false;
         selected = null;
         LinearLayout root = column(0xFFF4F7FB);
-        root.setPadding(dp(20), dp(18), dp(20), dp(18));
+        applySafeInsets(root);
 
         TextView eyebrow = text("NEARBY RADAR", 12, true, 0xFF5B6B80);
         root.addView(eyebrow);
@@ -96,7 +113,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         scanButton.setAllCaps(false);
         scanButton.setTextSize(16);
         scanButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        scanButton.setText("Radar starten");
+        scanButton.setText(scanner != null && scanner.isRunning() ? "Radar stoppen" : "Radar starten");
         scanButton.setOnClickListener(v -> toggleScan());
         LinearLayout.LayoutParams scanLp = matchWrap();
         scanLp.topMargin = dp(14);
@@ -109,7 +126,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         diagnosticLp.bottomMargin = dp(12);
         root.addView(diagnosticCard, diagnosticLp);
         diagnosticCard.addView(text("Live-Diagnose", 13, true, 0xFF142033));
-        status = text("Bereit – Radar starten, um Funkmodule zu prüfen.", 12, false, 0xFF64748B);
+        status = text(scanner != null && scanner.isRunning() ? "Radar läuft …" : "Bereit – Radar starten, um Funkmodule zu prüfen.", 12, false, 0xFF64748B);
         status.setTypeface(Typeface.MONOSPACE);
         status.setLineSpacing(0f, 1.08f);
         status.setPadding(0, dp(6), 0, 0);
@@ -133,7 +150,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         detailMode = true;
         selected = item;
         LinearLayout root = column(0xFFF4F7FB);
-        root.setPadding(dp(20), dp(18), dp(20), dp(18));
+        applySafeInsets(root);
 
         Button back = new Button(this);
         back.setAllCaps(false);
@@ -204,6 +221,11 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
             requestPermissions(scanner.requiredPermissions(), REQ_PERMISSIONS);
             return;
         }
+        if (scanner.needsNearbyWifiPermission() && !nearbyWifiPromptedThisSession) {
+            nearbyWifiPromptedThisSession = true;
+            requestPermissions(scanner.nearbyWifiPermissions(), REQ_NEARBY_WIFI);
+            return;
+        }
         devices.clear();
         scanner.start();
         scanButton.setText("Radar stoppen");
@@ -214,7 +236,12 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_PERMISSIONS) {
             if (scanner.hasRequiredPermissions()) toggleScan();
-            else Toast.makeText(this, "Für den Nearby-Scan werden Bluetooth-, Wi-Fi- und Standortberechtigungen benötigt.", Toast.LENGTH_LONG).show();
+            else Toast.makeText(this, "Für Bluetooth- und Wi-Fi-Scans werden Bluetooth und präziser Standort benötigt.", Toast.LENGTH_LONG).show();
+        } else if (requestCode == REQ_NEARBY_WIFI) {
+            if (scanner.needsNearbyWifiPermission()) {
+                Toast.makeText(this, "Nearby-Wi-Fi wurde nicht erlaubt. BLE, Classic und normale Wi-Fi-Netze funktionieren trotzdem; RTT/Aware bleiben deaktiviert.", Toast.LENGTH_LONG).show();
+            }
+            toggleScan();
         }
     }
 
