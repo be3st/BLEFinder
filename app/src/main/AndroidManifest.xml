@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Bluetooth Classic and BLE are both optional at install time; the app checks support at runtime. -->
+    <!-- Radio hardware is optional; capabilities are detected at runtime. -->
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.rtt" android:required="false" />
+    <uses-feature android:name="android.hardware.uwb" android:required="false" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
 
@@ -16,8 +20,14 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
-    <!-- This app intentionally uses RSSI as a physical-proximity signal, so location is declared. -->
+    <!-- Wi-Fi scanning/ranging and physical proximity. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+
+    <!-- UWB is optional and only used for cooperative ranging sessions. -->
+    <uses-permission android:name="android.permission.UWB_RANGING" />
 
     <application
         android:allowBackup="true"
