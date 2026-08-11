@@ -1,6 +1,7 @@
 package com.example.blefinder;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -12,6 +13,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -39,6 +41,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
     private boolean detailMode;
     private NearbyReading selected;
     private boolean nearbyWifiPromptedThisSession;
+    private String latestDiagnostic = "Bereit – Radar starten, um Funkmodule zu prüfen.";
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -121,16 +124,37 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
 
         LinearLayout diagnosticCard = card(0xFFFFFFFF, 20);
         diagnosticCard.setPadding(dp(14), dp(12), dp(14), dp(12));
+        diagnosticCard.setClickable(true);
+        diagnosticCard.setFocusable(true);
+        diagnosticCard.setOnClickListener(v -> showDiagnosticDialog());
         LinearLayout.LayoutParams diagnosticLp = matchWrap();
         diagnosticLp.topMargin = dp(10);
         diagnosticLp.bottomMargin = dp(12);
         root.addView(diagnosticCard, diagnosticLp);
-        diagnosticCard.addView(text("Live-Diagnose", 13, true, 0xFF142033));
-        status = text(scanner != null && scanner.isRunning() ? "Radar läuft …" : "Bereit – Radar starten, um Funkmodule zu prüfen.", 12, false, 0xFF64748B);
+
+        LinearLayout diagnosticHeader = new LinearLayout(this);
+        diagnosticHeader.setOrientation(LinearLayout.HORIZONTAL);
+        diagnosticHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView diagnosticTitle = text("Live-Diagnose", 13, true, 0xFF142033);
+        diagnosticHeader.addView(diagnosticTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView diagnosticHint = text("Tippen für Vollansicht ›", 11, true, 0xFF3157D5);
+        diagnosticHeader.addView(diagnosticHint);
+        diagnosticCard.addView(diagnosticHeader, matchWrap());
+
+        ScrollView diagnosticScroll = new ScrollView(this);
+        diagnosticScroll.setFillViewport(false);
+        diagnosticScroll.setVerticalScrollBarEnabled(true);
+        diagnosticScroll.setFadeScrollbars(false);
+        LinearLayout.LayoutParams diagnosticScrollLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150));
+        diagnosticScrollLp.topMargin = dp(6);
+        diagnosticCard.addView(diagnosticScroll, diagnosticScrollLp);
+
+        status = text(latestDiagnostic, 12, false, 0xFF64748B);
         status.setTypeface(Typeface.MONOSPACE);
         status.setLineSpacing(0f, 1.08f);
-        status.setPadding(0, dp(6), 0, 0);
-        diagnosticCard.addView(status);
+        status.setPadding(0, 0, dp(6), dp(4));
+        status.setTextIsSelectable(true);
+        diagnosticScroll.addView(status, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView section = text("Geräte in der Nähe", 20, true, 0xFF142033);
         section.setPadding(0, dp(4), 0, dp(8));
@@ -144,6 +168,32 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         root.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
         refresh();
+    }
+
+    private void showDiagnosticDialog() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(dp(18), dp(8), dp(18), dp(8));
+        scroll.setVerticalScrollBarEnabled(true);
+        scroll.setFadeScrollbars(false);
+
+        TextView full = text(latestDiagnostic, 13, false, 0xFF142033);
+        full.setTypeface(Typeface.MONOSPACE);
+        full.setLineSpacing(0f, 1.12f);
+        full.setTextIsSelectable(true);
+        full.setPadding(0, dp(4), 0, dp(12));
+        scroll.addView(full, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Live-Diagnose")
+                .setView(scroll)
+                .setPositiveButton("Schließen", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int) (getResources().getDisplayMetrics().heightPixels * 0.82f));
+            }
+        });
+        dialog.show();
     }
 
     private void showDetail(NearbyReading item) {
@@ -190,7 +240,7 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
         } else {
             TextView approx = text("RSSI-basierte Näherung – keine echte Distanzmessung", 13, false, 0xFF64748B);
             approx.setGravity(Gravity.CENTER);
-            approx.setPadding(0, dp(8), 0, 0);
+            approx.setPadding(0, dp(8), dp(8), 0);
             scoreCard.addView(approx);
         }
 
@@ -274,7 +324,8 @@ public class MainActivity extends Activity implements MultiRadioScanner.Listener
 
     @Override public void onStatus(String value) {
         runOnUiThread(() -> {
-            if (status != null) status.setText(value);
+            latestDiagnostic = value == null ? "" : value;
+            if (status != null) status.setText(latestDiagnostic);
         });
     }
 
