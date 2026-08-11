@@ -69,11 +69,11 @@ final class MultiRadioScanner {
     void start() {
         if (running) return;
         running = true;
-        registerReceiver();
-        startBle();
-        startClassic();
-        startWifi();
-        startAware();
+        try { registerReceiver(); } catch (Exception e) { listener.onStatus("Receiver nicht verfügbar"); }
+        try { startBle(); } catch (Exception e) { listener.onStatus("BLE nicht verfügbar"); }
+        try { startClassic(); } catch (Exception e) { listener.onStatus("Classic nicht verfügbar"); }
+        try { startWifi(); } catch (Exception e) { listener.onStatus("Wi-Fi nicht verfügbar"); }
+        try { startAware(); } catch (Exception e) { listener.onStatus("Wi-Fi Aware nicht verfügbar"); }
         listener.onStatus(statusText());
     }
 
@@ -98,6 +98,10 @@ final class MultiRadioScanner {
             if (activity.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) return false;
             if (activity.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return false;
         }
+        if (Build.VERSION.SDK_INT >= 33
+                && activity.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
         return activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
@@ -113,6 +117,7 @@ final class MultiRadioScanner {
     }
 
     private void registerReceiver() {
+        if (receiverRegistered) return;
         IntentFilter f = new IntentFilter();
         f.addAction(BluetoothDevice.ACTION_FOUND);
         f.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
@@ -124,19 +129,23 @@ final class MultiRadioScanner {
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            String a = intent.getAction();
-            if (BluetoothDevice.ACTION_FOUND.equals(a)) {
-                BluetoothDevice d = Build.VERSION.SDK_INT >= 33
-                        ? intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class)
-                        : intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                int rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE);
-                if (d != null && rssi != Short.MIN_VALUE) {
-                    listener.onRssi("BT:" + address(d), name(d, "Bluetooth-Gerät"), "Classic", rssi);
+            try {
+                String a = intent.getAction();
+                if (BluetoothDevice.ACTION_FOUND.equals(a)) {
+                    BluetoothDevice d = Build.VERSION.SDK_INT >= 33
+                            ? intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class)
+                            : intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    int rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE);
+                    if (d != null && rssi != Short.MIN_VALUE) {
+                        listener.onRssi("BT:" + address(d), name(d, "Bluetooth-Gerät"), "Classic", rssi);
+                    }
+                } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(a)) {
+                    if (running) handler.postDelayed(MultiRadioScanner.this::startClassic, 1200);
+                } else if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(a)) {
+                    consumeWifi();
                 }
-            } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(a)) {
-                if (running) handler.postDelayed(MultiRadioScanner.this::startClassic, 1200);
-            } else if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(a)) {
-                consumeWifi();
+            } catch (Exception e) {
+                listener.onStatus("Ein Funkmodul wurde übersprungen: " + e.getClass().getSimpleName());
             }
         }
     };
@@ -154,7 +163,9 @@ final class MultiRadioScanner {
             if (ble == null) return;
             ScanSettings s = new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build();
             ble.startScan(null, s, bleCallback);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            listener.onStatus("BLE konnte nicht gestartet werden");
+        }
     }
 
     private void consumeBle(ScanResult result) {
@@ -168,19 +179,22 @@ final class MultiRadioScanner {
 
     private void startClassic() {
         if (!running || bt == null || !hasRequiredPermissions()) return;
-        try { if (!bt.isDiscovering()) bt.startDiscovery(); } catch (Exception ignored) {}
+        try { if (!bt.isDiscovering()) bt.startDiscovery(); }
+        catch (Exception e) { listener.onStatus("Classic-Suche nicht verfügbar"); }
     }
 
     private void startWifi() {
         if (!running || wifi == null || !hasRequiredPermissions()) return;
-        try { wifi.startScan(); } catch (Exception ignored) {}
+        try { wifi.startScan(); }
+        catch (Exception e) { listener.onStatus("Wi-Fi-Scan nicht verfügbar"); }
         handler.postDelayed(() -> { if (running) startWifi(); }, 15_000);
     }
 
     private void consumeWifi() {
         if (wifi == null || !hasRequiredPermissions()) return;
         List<android.net.wifi.ScanResult> results;
-        try { results = wifi.getScanResults(); } catch (Exception e) { return; }
+        try { results = wifi.getScanResults(); }
+        catch (Exception e) { listener.onStatus("Wi-Fi-Ergebnisse nicht verfügbar"); return; }
         if (results == null) return;
         List<android.net.wifi.ScanResult> responders = new ArrayList<>();
         for (android.net.wifi.ScanResult r : results) {
@@ -192,53 +206,83 @@ final class MultiRadioScanner {
     }
 
     private void rangeWifi(List<android.net.wifi.ScanResult> responders) {
-        if (Build.VERSION.SDK_INT < 28 || rtt == null || !rtt.isAvailable()) return;
+        if (Build.VERSION.SDK_INT < 28 || rtt == null) return;
+        boolean available;
+        try { available = rtt.isAvailable(); } catch (Exception e) { return; }
+        if (!available) return;
         responders.sort(Comparator.comparingInt((android.net.wifi.ScanResult x) -> x.level).reversed());
         List<android.net.wifi.ScanResult> selected = responders.subList(0, Math.min(8, responders.size()));
         try {
             RangingRequest.Builder b = new RangingRequest.Builder();
             b.addAccessPoints(selected);
             rtt.startRanging(b.build(), activity.getMainExecutor(), new RangingResultCallback() {
-                @Override public void onRangingFailure(int code) { }
+                @Override public void onRangingFailure(int code) {
+                    listener.onStatus("RTT derzeit nicht verfügbar");
+                }
                 @Override public void onRangingResults(List<RangingResult> results) {
-                    for (RangingResult rr : results) {
-                        if (rr.getStatus() != RangingResult.STATUS_SUCCESS || rr.getMacAddress() == null) continue;
-                        String mac = rr.getMacAddress().toString();
-                        double m = rr.getDistanceMm() / 1000.0;
-                        Double sd = rr.getDistanceStdDevMm() > 0 ? rr.getDistanceStdDevMm() / 1000.0 : null;
-                        listener.onDistance("WIFI:" + mac, "RTT Access Point", "Wi-Fi RTT", m, sd);
-                    }
+                    try {
+                        for (RangingResult rr : results) {
+                            if (rr.getStatus() != RangingResult.STATUS_SUCCESS || rr.getMacAddress() == null) continue;
+                            String mac = rr.getMacAddress().toString();
+                            double m = rr.getDistanceMm() / 1000.0;
+                            Double sd = rr.getDistanceStdDevMm() > 0 ? rr.getDistanceStdDevMm() / 1000.0 : null;
+                            listener.onDistance("WIFI:" + mac, "RTT Access Point", "Wi-Fi RTT", m, sd);
+                        }
+                    } catch (Exception ignored) {}
                 }
             });
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            listener.onStatus("RTT wurde übersprungen");
+        }
     }
 
     private void startAware() {
-        if (!running || Build.VERSION.SDK_INT < 26 || aware == null || !aware.isAvailable()) return;
+        if (!running || Build.VERSION.SDK_INT < 26 || aware == null || !hasRequiredPermissions()) return;
+        boolean available;
+        try { available = aware.isAvailable(); } catch (Exception e) { return; }
+        if (!available) return;
         try {
             aware.attach(new AttachCallback() {
                 @Override public void onAttached(WifiAwareSession session) {
+                    if (!running) {
+                        try { session.close(); } catch (Exception ignored) {}
+                        return;
+                    }
                     awareSession = session;
-                    PublishConfig pub = new PublishConfig.Builder().setServiceName(AWARE_SERVICE).build();
-                    SubscribeConfig sub = new SubscribeConfig.Builder().setServiceName(AWARE_SERVICE).build();
-                    session.publish(pub, new DiscoverySessionCallback(){}, handler);
-                    session.subscribe(sub, new DiscoverySessionCallback() {
-                        @Override public void onServiceDiscovered(PeerHandle peer, byte[] info, List<byte[]> match) {
-                            listener.onSeen("AWARE:" + peer.hashCode(), "BLE Finder Peer", "Wi-Fi Aware");
-                        }
-                    }, handler);
+                    try {
+                        PublishConfig pub = new PublishConfig.Builder().setServiceName(AWARE_SERVICE).build();
+                        SubscribeConfig sub = new SubscribeConfig.Builder().setServiceName(AWARE_SERVICE).build();
+                        session.publish(pub, new DiscoverySessionCallback() {}, handler);
+                        session.subscribe(sub, new DiscoverySessionCallback() {
+                            @Override public void onServiceDiscovered(PeerHandle peer, byte[] info, List<byte[]> match) {
+                                try {
+                                    listener.onSeen("AWARE:" + peer.hashCode(), "BLE Finder Peer", "Wi-Fi Aware");
+                                } catch (Exception ignored) {}
+                            }
+                        }, handler);
+                    } catch (Exception e) {
+                        listener.onStatus("Wi-Fi Aware wurde übersprungen");
+                        try { session.close(); } catch (Exception ignored) {}
+                        awareSession = null;
+                    }
+                }
+
+                @Override public void onAttachFailed() {
+                    listener.onStatus("Wi-Fi Aware nicht verfügbar");
                 }
             }, handler);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            listener.onStatus("Wi-Fi Aware nicht verfügbar");
+        }
     }
 
     private String statusText() {
         List<String> s = new ArrayList<>();
         if (bt != null) { s.add("BLE"); s.add("Classic"); }
         if (wifi != null) s.add("Wi-Fi");
-        if (rtt != null && Build.VERSION.SDK_INT >= 28 && rtt.isAvailable()) s.add("RTT");
-        if (aware != null && Build.VERSION.SDK_INT >= 26 && aware.isAvailable()) s.add("Aware");
-        if (activity.getPackageManager().hasSystemFeature("android.hardware.uwb")) s.add("UWB-ready");
+        try { if (rtt != null && Build.VERSION.SDK_INT >= 28 && rtt.isAvailable()) s.add("RTT"); } catch (Exception ignored) {}
+        try { if (aware != null && Build.VERSION.SDK_INT >= 26 && aware.isAvailable()) s.add("Aware"); } catch (Exception ignored) {}
+        try { if (activity.getPackageManager().hasSystemFeature("android.hardware.uwb")) s.add("UWB-ready"); } catch (Exception ignored) {}
         return "Aktiv: " + String.join(" · ", s);
     }
 
