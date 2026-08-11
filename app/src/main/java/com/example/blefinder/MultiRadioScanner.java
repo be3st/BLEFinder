@@ -45,6 +45,9 @@ final class MultiRadioScanner {
     }
 
     private static final String AWARE_SERVICE = "blefinder-nearby-v2";
+    private static final long BLE_HEALTH_CHECK_MS = 15_000L;
+    private static final long BLE_RESTART_DELAY_MS = 1_000L;
+
     private final Activity activity;
     private final Listener listener;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -52,6 +55,7 @@ final class MultiRadioScanner {
     private final WifiManager wifi;
     private final WifiRttManager rtt;
     private final WifiAwareManager aware;
+
     private BluetoothLeScanner ble;
     private WifiAwareSession awareSession;
     private boolean running;
@@ -60,12 +64,26 @@ final class MultiRadioScanner {
     private int blePackets, classicDevices, wifiNetworks, rttMeasurements, awarePeers;
     private String bleNote="warte", classicNote="warte", wifiNote="warte", rttNote="warte", awareNote="warte";
     private long startedAt;
+    private long lastBlePacketAt;
+    private int bleRestartCount;
 
     private final Runnable diagnosticsTicker = new Runnable() {
         @Override public void run() {
             if (!running) return;
             listener.onStatus(diagnosticsText());
             handler.postDelayed(this, 1000L);
+        }
+    };
+
+    private final Runnable bleHealthTicker = new Runnable() {
+        @Override public void run() {
+            if (!running) return;
+            long now = System.currentTimeMillis();
+            long lastActivity = lastBlePacketAt > 0 ? lastBlePacketAt : startedAt;
+            if (bleStarted && now - lastActivity >= BLE_HEALTH_CHECK_MS) {
+                restartBle("keine Pakete seit " + ((now - lastActivity) / 1000L) + " s");
+            }
+            handler.postDelayed(this, BLE_HEALTH_CHECK_MS);
         }
     };
 
@@ -90,7 +108,9 @@ final class MultiRadioScanner {
         startWifi();
         startAware();
         handler.removeCallbacks(diagnosticsTicker);
+        handler.removeCallbacks(bleHealthTicker);
         handler.post(diagnosticsTicker);
+        handler.postDelayed(bleHealthTicker, BLE_HEALTH_CHECK_MS);
     }
 
     void stop() {
@@ -119,20 +139,33 @@ final class MultiRadioScanner {
             p.add(Manifest.permission.BLUETOOTH_SCAN);
             p.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
-        if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.NEARBY_WIFI_DEVICES);
         p.add(Manifest.permission.ACCESS_FINE_LOCATION);
         return p.toArray(new String[0]);
+    }
+
+    boolean needsNearbyWifiPermission() {
+        return Build.VERSION.SDK_INT >= 33 && !hasNearbyWifiPermission();
+    }
+
+    String[] nearbyWifiPermissions() {
+        if (Build.VERSION.SDK_INT >= 33) return new String[]{Manifest.permission.NEARBY_WIFI_DEVICES};
+        return new String[0];
     }
 
     private boolean granted(String permission) {
         return Build.VERSION.SDK_INT < 23 || activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
+
     private boolean hasBlePermissions() {
         return Build.VERSION.SDK_INT < 31 || (granted(Manifest.permission.BLUETOOTH_SCAN) && granted(Manifest.permission.BLUETOOTH_CONNECT));
     }
+
     private boolean hasLocationPermission() { return granted(Manifest.permission.ACCESS_FINE_LOCATION); }
     private boolean hasNearbyWifiPermission() { return Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.NEARBY_WIFI_DEVICES); }
-    private boolean hasWifiScanPermissions() { return hasLocationPermission() && hasNearbyWifiPermission(); }
+
+    // startScan()/getScanResults() are location-sensitive APIs. Nearby Wi-Fi is not allowed to block plain AP scanning.
+    private boolean hasWifiScanPermissions() { return hasLocationPermission(); }
+    private boolean hasWifiRangingPermissions() { return hasLocationPermission() && hasNearbyWifiPermission(); }
 
     private boolean locationServicesEnabled() {
         try {
@@ -146,6 +179,8 @@ final class MultiRadioScanner {
     private void resetDiagnostics() {
         bleStarted=classicStarted=wifiStarted=awareStarted=rttAvailable=false;
         blePackets=classicDevices=wifiNetworks=rttMeasurements=awarePeers=0;
+        bleRestartCount=0;
+        lastBlePacketAt=0L;
         bleNote=classicNote=wifiNote=rttNote=awareNote="warte";
     }
 
@@ -180,39 +215,62 @@ final class MultiRadioScanner {
                     listener.onRssi("BT:"+address(d), name(d,"Bluetooth-Gerät"), "Classic", rssiValue);
                 }
             } else if (BluetoothAdapter.ACTION_DISCOVERY_STARTED.equals(a)) {
-                classicStarted=true; classicNote="aktiv";
+                classicStarted=true;
+                classicNote="aktiv";
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(a)) {
                 classicStarted=false;
                 classicNote=classicDevices>0 ? "Zyklus fertig" : "0 Treffer im letzten Zyklus";
                 if (running) handler.postDelayed(MultiRadioScanner.this::startClassicFresh, 1500L);
-            } else if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(a)) consumeWifi();
+            } else if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(a)) {
+                consumeWifi();
+            }
         }
     };
 
     private final ScanCallback bleCallback = new ScanCallback() {
         @Override public void onScanResult(int callbackType, ScanResult result) { consumeBle(result); }
         @Override public void onBatchScanResults(List<ScanResult> results) { for (ScanResult r:results) consumeBle(r); }
-        @Override public void onScanFailed(int errorCode) { bleStarted=false; bleNote="Scanfehler "+errorCode; }
+        @Override public void onScanFailed(int errorCode) {
+            bleStarted=false;
+            bleNote="Scanfehler "+errorCode;
+        }
     };
 
     private void startBle() {
         if (!running || bt == null) { bleNote="kein Bluetooth-Adapter"; return; }
         if (!isBluetoothEnabled()) { bleNote="Bluetooth ist AUS"; return; }
         if (!hasBlePermissions()) { bleNote="Bluetooth-Berechtigung fehlt"; return; }
+        if (!hasLocationPermission()) { bleNote="Standort-Berechtigung fehlt"; return; }
+        if (!locationServicesEnabled()) { bleNote="Standortdienst ist AUS"; return; }
         if (!activity.getPackageManager().hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) { bleNote="BLE nicht unterstützt"; return; }
         try {
             ble=bt.getBluetoothLeScanner();
             if (ble==null) { bleNote="Scanner nicht verfügbar"; return; }
-            ScanSettings settings=new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).setReportDelay(0).build();
+            ScanSettings settings=new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setReportDelay(0)
+                    .build();
             ble.startScan(null,settings,bleCallback);
-            bleStarted=true; bleNote="aktiv, warte auf Pakete";
+            bleStarted=true;
+            bleNote="aktiv, warte auf Pakete" + (bleRestartCount>0 ? " · Neustarts "+bleRestartCount : "");
         } catch (SecurityException e) { bleNote="SecurityException"; }
         catch (Exception e) { bleNote="Startfehler: "+e.getClass().getSimpleName(); }
     }
 
+    private void restartBle(String reason) {
+        if (!running) return;
+        try { if (ble != null && bleStarted) ble.stopScan(bleCallback); } catch (Exception ignored) {}
+        bleStarted=false;
+        bleRestartCount++;
+        bleNote="Neustart #"+bleRestartCount+" ("+reason+")";
+        handler.postDelayed(() -> { if (running) startBle(); }, BLE_RESTART_DELAY_MS);
+    }
+
     private void consumeBle(ScanResult result) {
         if (result==null) return;
-        blePackets++; bleNote="empfängt";
+        blePackets++;
+        lastBlePacketAt=System.currentTimeMillis();
+        bleNote="empfängt" + (bleRestartCount>0 ? " · Neustarts "+bleRestartCount : "");
         BluetoothDevice d=result.getDevice();
         ScanRecord record=result.getScanRecord();
         String n=record==null?null:record.getDeviceName();
@@ -239,7 +297,7 @@ final class MultiRadioScanner {
         try {
             classicStarted=bt.startDiscovery();
             classicNote=classicStarted?"aktiv":"startDiscovery=false (System lehnt ab)";
-            if (!classicStarted) handler.postDelayed(this::startClassicFresh, 4000L);
+            if (!classicStarted) handler.postDelayed(this::startClassicFresh,4000L);
         } catch (SecurityException e) { classicNote="SecurityException"; }
         catch (Exception e) { classicNote="Startfehler: "+e.getClass().getSimpleName(); }
     }
@@ -247,12 +305,15 @@ final class MultiRadioScanner {
     private void startWifi() {
         if (!running || wifi==null) { wifiNote="kein Wi-Fi-Manager"; return; }
         if (!isWifiEnabled()) { wifiNote="Wi-Fi ist AUS"; scheduleWifi(); return; }
-        if (!hasWifiScanPermissions()) { wifiNote="Wi-Fi/Standort-Berechtigung fehlt"; scheduleWifi(); return; }
+        if (!hasWifiScanPermissions()) { wifiNote="Standort-Berechtigung fehlt"; scheduleWifi(); return; }
+        if (!locationServicesEnabled()) { wifiNote="Standortdienst ist AUS"; scheduleWifi(); return; }
+
+        // Cached results are useful even when Android throttles a new active scan.
         consumeWifi();
         try {
             boolean requested=wifi.startScan();
             wifiStarted=requested;
-            if (wifiNetworks>0) wifiNote="cached/aktuell verfügbar";
+            if (wifiNetworks>0) wifiNote="Ergebnisse verfügbar" + (requested?" · neuer Scan angefordert":" · aktiver Scan gedrosselt");
             else wifiNote=requested?"Scan angefordert":"startScan=false / gedrosselt";
         } catch (SecurityException e) { wifiNote="SecurityException"; }
         catch (Exception e) { wifiNote="Startfehler: "+e.getClass().getSimpleName(); }
@@ -266,7 +327,7 @@ final class MultiRadioScanner {
         List<android.net.wifi.ScanResult> results;
         try { results=wifi.getScanResults(); }
         catch (SecurityException e) { wifiNote="SecurityException bei Ergebnissen"; return; }
-        catch (Exception e) { wifiNote="Ergebnisfehler"; return; }
+        catch (Exception e) { wifiNote="Ergebnisfehler: "+e.getClass().getSimpleName(); return; }
         if (results==null) return;
         wifiNetworks=results.size();
         if (!results.isEmpty()) wifiNote="empfängt";
@@ -282,20 +343,22 @@ final class MultiRadioScanner {
 
     private void rangeWifi(List<android.net.wifi.ScanResult> responders) {
         if (Build.VERSION.SDK_INT<28 || rtt==null) { rttNote="nicht unterstützt"; return; }
-        if (!hasWifiScanPermissions()) { rttNote="Berechtigung fehlt"; return; }
+        if (!hasWifiRangingPermissions()) { rttNote="Nearby-Wi-Fi/Standort fehlt"; return; }
         try { rttAvailable=rtt.isAvailable(); } catch (Exception e) { rttAvailable=false; }
         if (!rttAvailable) { rttNote="nicht verfügbar"; return; }
         responders.sort(Comparator.comparingInt((android.net.wifi.ScanResult x)->x.level).reversed());
         List<android.net.wifi.ScanResult> selected=responders.subList(0,Math.min(8,responders.size()));
         rttNote="messe "+selected.size()+" AP(s)";
         try {
-            RangingRequest.Builder b=new RangingRequest.Builder(); b.addAccessPoints(selected);
+            RangingRequest.Builder b=new RangingRequest.Builder();
+            b.addAccessPoints(selected);
             rtt.startRanging(b.build(),activity.getMainExecutor(),new RangingResultCallback() {
                 @Override public void onRangingFailure(int code) { rttNote="Ranging-Fehler "+code; }
                 @Override public void onRangingResults(List<RangingResult> results) {
                     for (RangingResult rr:results) {
                         if (rr.getStatus()!=RangingResult.STATUS_SUCCESS || rr.getMacAddress()==null) continue;
-                        rttMeasurements++; rttNote="empfängt";
+                        rttMeasurements++;
+                        rttNote="empfängt";
                         String mac=rr.getMacAddress().toString();
                         double m=rr.getDistanceMm()/1000.0;
                         Double sd=rr.getDistanceStdDevMm()>0?rr.getDistanceStdDevMm()/1000.0:null;
@@ -316,14 +379,17 @@ final class MultiRadioScanner {
         try {
             aware.attach(new AttachCallback() {
                 @Override public void onAttached(WifiAwareSession session) {
-                    awareSession=session; awareStarted=true; awareNote="verbunden";
+                    awareSession=session;
+                    awareStarted=true;
+                    awareNote="verbunden";
                     try {
                         PublishConfig pub=new PublishConfig.Builder().setServiceName(AWARE_SERVICE).build();
                         SubscribeConfig sub=new SubscribeConfig.Builder().setServiceName(AWARE_SERVICE).build();
                         session.publish(pub,new DiscoverySessionCallback(){},handler);
                         session.subscribe(sub,new DiscoverySessionCallback() {
                             @Override public void onServiceDiscovered(PeerHandle peer, byte[] info, List<byte[]> match) {
-                                awarePeers++; awareNote="Peer entdeckt";
+                                awarePeers++;
+                                awareNote="Peer entdeckt";
                                 listener.onSeen("AWARE:"+peer.hashCode(),"BLE Finder Peer","Wi-Fi Aware");
                             }
                         },handler);
@@ -362,6 +428,7 @@ final class MultiRadioScanner {
         if (d==null) return "unknown";
         try { return d.getAddress(); } catch (Exception e) { return Integer.toHexString(d.hashCode()); }
     }
+
     private String name(BluetoothDevice d,String fallback) {
         if (d==null) return fallback;
         try { String n=d.getName(); return n==null || n.isBlank()?fallback:n; }
